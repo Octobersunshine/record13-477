@@ -129,6 +129,9 @@ func setupRouter(handler *handlers.RuleHandler, trustedProxy string) *gin.Engine
 			rules.PUT("/:id", handler.UpdateRule)
 			rules.DELETE("/:id", handler.DeleteRule)
 			rules.POST("/sync", handler.SyncRules)
+
+			rules.POST("/batch", handler.BatchCreateRules)
+			rules.PUT("/batch", handler.BatchUpdateRules)
 		}
 	}
 

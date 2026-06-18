@@ -287,11 +287,11 @@ API 层 (handlers)
     ↓
 业务层 (service)  ───→  事务协调：先操作防火墙，再落库
     ↓
-防火墙管理器 (firewall.Manager)  ───→  状态机调度
+防火墙管理器 (firewall.Manager)  ───→  状态机调度 + 回滚管理
     ↓
 具体后端 (FirewallBackend)
     ├── WindowsNetshBackend → netsh advfirewall 命令
-    └── MockBackend → 内存模拟（测试用）
+    └── MockBackend → 内存模拟（测试用，支持故障注入）
 ```
 
 ### 关键保证
@@ -303,14 +303,102 @@ API 层 (handlers)
 2. **修改流程**：对比差异 → 有变化则「删旧+加新」
    - 检测到规则关键字段（动作/方向/协议/IP/端口）变化才触发防火墙操作
    - 仅修改描述/名称等不触发防火墙变更
+   - **新增**：删旧成功但加新失败时，自动回滚恢复旧规则
 
 3. **启停切换**：
    - active→disabled: 从防火墙删除，保留 DB 记录
    - disabled→active: 重新添加到防火墙
+   - **新增**：操作失败时自动恢复到切换前状态
 
 4. **删除流程**：先从防火墙移除 → 再删除 DB 记录
+   - **新增**：DB 删除失败时自动回滚，重新添加防火墙规则
 
-5. **错误处理**：防火墙操作失败时标记 `status=error` 并记录 `error_msg`，便于人工排查
+5. **错误处理**：
+   - 防火墙操作失败且成功回滚：返回 `ErrRollbackOccurred`，HTTP 409 Conflict
+   - 防火墙操作失败且无法回滚：标记 `status=error` 并记录 `error_msg`
+   - 所有操作返回 `RollbackInfo`，包含上一版本完整状态
+
+## 回滚机制设计（新增）
+
+### 回滚管理器（RollbackManager）
+
+位于 [firewall/rollback.go](file:///e:/temp/record13/477/firewall/rollback.go)，实现备忘录（Memento）模式：
+
+```
+操作前：记录操作类型 + 完整快照
+操作中：每成功一步，记录到回滚日志
+操作失败：逆序执行回滚日志中的反向操作
+操作成功：Commit() 清空回滚日志
+```
+
+支持的操作类型：
+
+| 操作类型 | 正向操作 | 反向操作（回滚） |
+|---------|---------|----------------|
+| `OpAdd` | AddRule | DeleteRule |
+| `OpDelete` | DeleteRule | AddRule |
+| `OpUpdate` | Delete(old) + Add(new) | Delete(new) + Add(old) |
+
+### 原子性操作矩阵
+
+| 操作 | 成功路径 | 失败回滚路径 |
+|-----|---------|-------------|
+| 单条创建 | Add → DB 写入 | 已 Add 但 DB 失败 → Delete |
+| 单条修改 | Delete(old) → Add(new) → DB 更新 | Delete(old) 成功但 Add(new) 失败 → Add(old) |
+| 单条删除 | Delete → DB 删除 | Delete 成功但 DB 失败 → Add(old) |
+| 启停切换 | Add/Disable → DB 更新 | 操作失败 → 恢复原始状态 |
+| 批量创建 | N × (Add → DB 写入) | 第 M 条失败 → 回滚前 M-1 条的 Add + DB 删除 |
+| 批量修改 | N × (Delete(old) → Add(new) → DB 更新) | 第 M 条失败 → 回滚前 M-1 条的 Update + DB 恢复 |
+| 全量同步 | Delete(all) → N × Add → DB 更新 | 第 M 条失败 → 回滚所有已删除 + 已添加的规则 |
+
+### 回滚信息（RollbackInfo）
+
+所有变更操作返回 `RollbackInfo` 结构：
+
+```json
+{
+  "success": false,
+  "rollbacked": true,
+  "rollback_errors": ["rollback executed"],
+  "previous_state": {
+    "id": "rule-uuid",
+    "group_id": "web-sg-001",
+    "action": "allow",
+    "ip_address": "192.168.1.0/24",
+    "port_start": 80,
+    "status": "active",
+    "firewall_id": "SG_web-sg-001_abc12345"
+  }
+}
+```
+
+字段说明：
+- `success`: 操作是否最终成功
+- `rollbacked`: 是否执行了回滚
+- `rollback_errors`: 回滚过程中发生的错误（空表示回滚成功）
+- `previous_state`: 操作前的完整规则快照，便于人工核查
+
+### HTTP 状态码约定
+
+| 场景 | HTTP 状态码 | 业务码 | 说明 |
+|-----|-----------|--------|------|
+| 操作成功 | 200/201 | 0 | 正常成功 |
+| 部分验证失败 | 207 Multi-Status | 207xxx | 仅验证失败，无状态变更 |
+| 操作失败但成功回滚 | 409 Conflict | 409xxx | 已恢复到操作前状态 |
+| 操作失败无法回滚 | 424 Failed Dependency | 424xxx | 状态不一致，需人工干预 |
+
+### 回滚测试覆盖
+
+位于 [service/rollback_test.go](file:///e:/temp/record13/477/service/rollback_test.go)，包含 9 个专项测试：
+
+- `TestUpdateRule_AddNewRuleFail_Rollback` - 修改时添加新规则失败，回滚恢复旧规则
+- `TestUpdateRule_DeleteOldFail_Rollback` - 修改时删除旧规则失败，回滚
+- `TestBatchCreate_ThirdItemFails_AllRollback` - 批量创建第3条失败，全部回滚
+- `TestBatchUpdate_SecondItemFails_AllRollback` - 批量修改第2条失败，全部回滚
+- `TestSyncAll_ThirdRuleFails_AllRollback` - 同步时第3条失败，全部回滚
+- `TestToggleStatus_DisableFail_Rollback` - 禁用失败，回滚保持启用
+- `TestRollbackInfo_PreviousStatePreserved` - 验证上一版本状态完整保留
+- `TestBatchCreate_PartialValidationFail_NoRollbackNeeded` - 验证失败不触发回滚
 
 ## Windows 防火墙命名约定
 

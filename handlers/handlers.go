@@ -41,6 +41,44 @@ func errorResponse(c *gin.Context, httpStatus int, code int, message string) {
 	})
 }
 
+func toRollbackInfoResponse(rb *service.RollbackInfo) *models.RollbackInfoResponse {
+	if rb == nil {
+		return nil
+	}
+	resp := &models.RollbackInfoResponse{
+		Success:       rb.Success,
+		Rollbacked:    rb.Rollbacked,
+		PreviousState: rb.PreviousState,
+	}
+	for _, e := range rb.RollbackErrors {
+		resp.RollbackErrors = append(resp.RollbackErrors, e.Error())
+	}
+	return resp
+}
+
+func toBatchResultResponse(br *service.BatchResult) *models.BatchResultResponse {
+	if br == nil {
+		return nil
+	}
+	resp := &models.BatchResultResponse{
+		Success:    br.Success,
+		Failed:     br.Failed,
+		Total:      br.Total,
+		Rollbacked: br.Rollbacked,
+	}
+	for _, item := range br.FailedItems {
+		resp.FailedItems = append(resp.FailedItems, models.BatchFailedItemResponse{
+			Index:   item.Index,
+			RuleID:  item.RuleID,
+			Message: item.Message,
+		})
+	}
+	for _, e := range br.RollbackErrs {
+		resp.RollbackErrs = append(resp.RollbackErrs, e.Error())
+	}
+	return resp
+}
+
 func (h *RuleHandler) CreateRule(c *gin.Context) {
 	var req models.CreateRuleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -119,8 +157,13 @@ func (h *RuleHandler) UpdateRule(c *gin.Context) {
 		return
 	}
 
-	rule, err := h.svc.UpdateRule(id, &req)
+	rule, rbInfo, err := h.svc.UpdateRule(id, &req)
 	if err != nil {
+		respData := gin.H{
+			"rule":         rule,
+			"rollback_info": toRollbackInfoResponse(rbInfo),
+		}
+
 		if errors.Is(err, service.ErrRuleNotFound) {
 			errorResponse(c, http.StatusNotFound, 40402, err.Error())
 			return
@@ -129,19 +172,34 @@ func (h *RuleHandler) UpdateRule(c *gin.Context) {
 			errorResponse(c, http.StatusBadRequest, 40006, err.Error())
 			return
 		}
+		if errors.Is(err, service.ErrRollbackOccurred) {
+			c.JSON(http.StatusConflict, models.APIResponse{
+				Code:    409001,
+				Message: "Operation failed and rolled back to previous state: " + err.Error(),
+				Data:    respData,
+			})
+			return
+		}
 		if errors.Is(err, service.ErrFirewallApply) {
 			c.JSON(http.StatusFailedDependency, models.APIResponse{
 				Code:    424002,
 				Message: err.Error(),
-				Data:    rule,
+				Data:    respData,
 			})
 			return
 		}
-		errorResponse(c, http.StatusInternalServerError, 50004, "internal error: "+err.Error())
+		c.JSON(http.StatusInternalServerError, models.APIResponse{
+			Code:    50004,
+			Message: "internal error: " + err.Error(),
+			Data:    respData,
+		})
 		return
 	}
 
-	successResponse(c, rule)
+	successResponse(c, gin.H{
+		"rule":         rule,
+		"rollback_info": toRollbackInfoResponse(rbInfo),
+	})
 }
 
 func (h *RuleHandler) DeleteRule(c *gin.Context) {
@@ -151,31 +209,139 @@ func (h *RuleHandler) DeleteRule(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.DeleteRule(id)
+	rbInfo, err := h.svc.DeleteRule(id)
 	if err != nil {
+		respData := gin.H{
+			"id":            id,
+			"rollback_info": toRollbackInfoResponse(rbInfo),
+		}
+
 		if errors.Is(err, service.ErrRuleNotFound) {
 			errorResponse(c, http.StatusNotFound, 40403, err.Error())
 			return
 		}
-		if errors.Is(err, service.ErrFirewallApply) {
-			errorResponse(c, http.StatusFailedDependency, 424003, err.Error())
+		if errors.Is(err, service.ErrRollbackOccurred) {
+			c.JSON(http.StatusConflict, models.APIResponse{
+				Code:    409002,
+				Message: "Delete failed and rolled back: " + err.Error(),
+				Data:    respData,
+			})
 			return
 		}
-		errorResponse(c, http.StatusInternalServerError, 50005, "internal error: "+err.Error())
+		if errors.Is(err, service.ErrFirewallApply) {
+			c.JSON(http.StatusFailedDependency, models.APIResponse{
+				Code:    424003,
+				Message: err.Error(),
+				Data:    respData,
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, models.APIResponse{
+			Code:    50005,
+			Message: "internal error: " + err.Error(),
+			Data:    respData,
+		})
 		return
 	}
 
-	successResponse(c, gin.H{"id": id})
+	successResponse(c, gin.H{
+		"id":            id,
+		"rollback_info": toRollbackInfoResponse(rbInfo),
+	})
 }
 
 func (h *RuleHandler) SyncRules(c *gin.Context) {
-	err := h.svc.SyncAllRules()
+	rbInfo, err := h.svc.SyncAllRules()
 	if err != nil {
-		errorResponse(c, http.StatusFailedDependency, 424004, "sync failed: "+err.Error())
+		respData := gin.H{
+			"backend":      h.svc.BackendName(),
+			"rollback_info": toRollbackInfoResponse(rbInfo),
+		}
+
+		if rbInfo != nil && rbInfo.Rollbacked {
+			c.JSON(http.StatusConflict, models.APIResponse{
+				Code:    409003,
+				Message: "Sync failed and rolled back: " + err.Error(),
+				Data:    respData,
+			})
+			return
+		}
+
+		c.JSON(http.StatusFailedDependency, models.APIResponse{
+			Code:    424004,
+			Message: "sync failed: " + err.Error(),
+			Data:    respData,
+		})
 		return
 	}
 
-	successResponse(c, gin.H{"synced": true, "backend": h.svc.BackendName()})
+	successResponse(c, gin.H{
+		"synced":       true,
+		"backend":      h.svc.BackendName(),
+		"rollback_info": toRollbackInfoResponse(rbInfo),
+	})
+}
+
+func (h *RuleHandler) BatchCreateRules(c *gin.Context) {
+	var req models.BatchCreateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, 40010, "invalid request body: "+err.Error())
+		return
+	}
+
+	result := h.svc.BatchCreateRules(req.Rules)
+	resp := toBatchResultResponse(result)
+
+	if result.Rollbacked {
+		c.JSON(http.StatusConflict, models.APIResponse{
+			Code:    409004,
+			Message: "Batch create failed, all changes rolled back",
+			Data:    resp,
+		})
+		return
+	}
+
+	if result.Failed > 0 {
+		c.JSON(http.StatusMultiStatus, models.APIResponse{
+			Code:    207001,
+			Message: "Some items failed",
+			Data:    resp,
+		})
+		return
+	}
+
+	successResponse(c, resp)
+}
+
+func (h *RuleHandler) BatchUpdateRules(c *gin.Context) {
+	var req models.BatchUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, 40011, "invalid request body: "+err.Error())
+		return
+	}
+
+	result := h.svc.BatchUpdateRules(req.Rules)
+	resp := toBatchResultResponse(result)
+
+	if result.Rollbacked {
+		c.JSON(http.StatusConflict, models.APIResponse{
+			Code:    409005,
+			Message: "Batch update failed, all changes rolled back",
+			Data:    resp,
+		})
+		return
+	}
+
+	if result.Failed > 0 {
+		c.JSON(http.StatusMultiStatus, models.APIResponse{
+			Code:    207002,
+			Message: "Some items failed",
+			Data:    resp,
+		})
+		return
+	}
+
+	successResponse(c, resp)
 }
 
 func (h *RuleHandler) GetHealth(c *gin.Context) {

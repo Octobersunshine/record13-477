@@ -1,14 +1,21 @@
 package firewall
 
 import (
+	"errors"
 	"fmt"
 	"securitygroup/models"
 	"sync"
 )
 
 type MockBackend struct {
-	mu    sync.Mutex
-	rules map[string]models.SecurityRule
+	mu                sync.Mutex
+	rules             map[string]models.SecurityRule
+	failOnAdd         bool
+	failOnDelete      bool
+	failOnDeleteCount  int
+	failOnAddCount     int
+	addCallCount       int
+	deleteCallCount    int
 }
 
 func NewMockBackend() *MockBackend {
@@ -21,7 +28,59 @@ func (b *MockBackend) Name() string {
 	return "mock"
 }
 
+var ErrMockFailure = errors.New("mock backend injected failure")
+
+func (b *MockBackend) SetFailOnAdd(fail bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failOnAdd = fail
+	b.addCallCount = 0
+}
+
+func (b *MockBackend) SetFailOnAddNth(nth int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failOnAdd = false
+	b.failOnAddCount = nth
+	b.addCallCount = 0
+}
+
+func (b *MockBackend) SetFailOnDelete(fail bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failOnDelete = fail
+	b.deleteCallCount = 0
+}
+
+func (b *MockBackend) SetFailOnDeleteNth(nth int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failOnDelete = false
+	b.failOnDeleteCount = nth
+	b.deleteCallCount = 0
+}
+
+func (b *MockBackend) ResetCounters() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.addCallCount = 0
+	b.deleteCallCount = 0
+	b.failOnAdd = false
+	b.failOnDelete = false
+	b.failOnAddCount = 0
+	b.failOnDeleteCount = 0
+}
+
 func (b *MockBackend) AddRule(rule *models.SecurityRule) (string, error) {
+	b.mu.Lock()
+	b.addCallCount++
+	shouldFail := b.failOnAdd || (b.failOnAddCount > 0 && b.addCallCount >= b.failOnAddCount)
+	b.mu.Unlock()
+
+	if shouldFail {
+		return "", ErrMockFailure
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -45,6 +104,15 @@ func (b *MockBackend) UpdateRule(oldRule *models.SecurityRule, newRule *models.S
 }
 
 func (b *MockBackend) DeleteRule(rule *models.SecurityRule) error {
+	b.mu.Lock()
+	b.deleteCallCount++
+	shouldFail := b.failOnDelete || (b.failOnDeleteCount > 0 && b.deleteCallCount >= b.failOnDeleteCount)
+	b.mu.Unlock()
+
+	if shouldFail {
+		return ErrMockFailure
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

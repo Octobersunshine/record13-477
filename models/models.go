@@ -87,6 +87,50 @@ type RuleListResponse struct {
 	List  []SecurityRule `json:"list"`
 }
 
+type BatchUpdateItem struct {
+	ID          string         `json:"id" binding:"required"`
+	GroupName   *string        `json:"group_name"`
+	Description *string        `json:"description"`
+	Action      *RuleAction    `json:"action" binding:"omitempty,oneof=allow deny"`
+	Direction   *RuleDirection `json:"direction" binding:"omitempty,oneof=inbound outbound"`
+	Protocol    *RuleProtocol  `json:"protocol" binding:"omitempty,oneof=TCP UDP ANY"`
+	IPAddress   *string        `json:"ip_address" binding:"omitempty,ip|cidr"`
+	PortStart   *int           `json:"port_start" binding:"omitempty,min=1,max=65535"`
+	PortEnd     *int           `json:"port_end" binding:"omitempty,min=1,max=65535"`
+	Priority    *int           `json:"priority" binding:"omitempty,min=1,max=10000"`
+	Status      *RuleStatus    `json:"status" binding:"omitempty,oneof=active disabled"`
+}
+
+type BatchCreateRequest struct {
+	Rules []CreateRuleRequest `json:"rules" binding:"required,min=1,dive"`
+}
+
+type BatchUpdateRequest struct {
+	Rules []BatchUpdateItem `json:"rules" binding:"required,min=1,dive"`
+}
+
+type RollbackInfoResponse struct {
+	Success        bool        `json:"success"`
+	Rollbacked     bool        `json:"rollbacked"`
+	RollbackErrors []string    `json:"rollback_errors,omitempty"`
+	PreviousState  interface{} `json:"previous_state,omitempty"`
+}
+
+type BatchResultResponse struct {
+	Success      int                      `json:"success"`
+	Failed       int                      `json:"failed"`
+	Total        int                      `json:"total"`
+	FailedItems  []BatchFailedItemResponse `json:"failed_items,omitempty"`
+	Rollbacked   bool                     `json:"rollbacked"`
+	RollbackErrs []string                 `json:"rollback_errors,omitempty"`
+}
+
+type BatchFailedItemResponse struct {
+	Index   int    `json:"index"`
+	RuleID  string `json:"rule_id,omitempty"`
+	Message string `json:"message"`
+}
+
 type APIResponse struct {
 	Code    int         `json:"code"`
 	Message string      `json:"message"`
