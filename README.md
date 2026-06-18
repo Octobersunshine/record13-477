@@ -1,1 +1,394 @@
-# record13-477
+# Security Group IP Rule Management API (Go)
+
+Go 语言开发的安全组 IP 规则管理接口，支持创建、修改安全组放行与拦截 IP 规则，**规则即刻生效**（通过操作系统防火墙实时应用）。
+
+## 项目特性
+
+- **规则 CRUD**：创建、查询、修改、删除安全组规则
+- **即刻生效**：规则变更后立即应用到操作系统防火墙
+- **多后端支持**：
+  - Windows: `netsh advfirewall` (Windows 高级防火墙)
+  - 跨平台: Mock 后端（用于测试和非 Windows 环境）
+- **支持规则类型**：
+  - 放行 (allow) / 拦截 (deny)
+  - 入站 (inbound) / 出站 (outbound)
+  - TCP / UDP / ANY 协议
+  - 单 IP 或 CIDR 网段
+  - 单个端口或端口范围
+- **优先级管理**：支持 1-10000 优先级设置
+- **启停控制**：规则可单独启用/禁用，无需删除
+- **持久化存储**：SQLite 数据库持久化
+- **全量同步**：支持手动/启动时自动同步所有规则到防火墙
+
+## 项目结构
+
+```
+477/
+├── main.go                    # 程序入口
+├── go.mod                     # 依赖管理
+├── config/
+│   └── config.go             # 配置加载（命令行+环境变量）
+├── models/
+│   └── models.go             # 数据模型与请求/响应结构
+├── repository/
+│   └── repository.go         # 数据访问层（SQLite GORM）
+├── firewall/
+│   ├── firewall.go           # 防火墙管理器（核心调度逻辑）
+│   ├── windows_netsh.go      # Windows netsh 后端实现
+│   └── mock_backend.go       # Mock 后端（测试/跨平台）
+├── service/
+│   ├── service.go            # 业务逻辑层
+│   └── service_test.go       # 业务逻辑单元测试
+└── handlers/
+    └── handlers.go           # REST API 处理器（Gin）
+```
+
+## 快速开始
+
+### 环境要求
+
+- Go 1.21+
+- Windows 系统（使用 netsh 后端时需要管理员权限）
+
+### 安装依赖
+
+```bash
+go mod tidy
+go mod download
+```
+
+### 启动服务
+
+```bash
+# 默认启动（Windows 自动使用 netsh，其他平台使用 mock）
+go run main.go
+
+# 指定端口和数据库路径
+go run main.go -port 8080 -db ./sg.db
+
+# 强制使用 mock 后端（跨平台开发测试）
+go run main.go -firewall mock
+
+# 禁用启动时自动同步
+go run main.go -autosync=false
+```
+
+### 环境变量配置
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `SG_PORT` | HTTP 服务端口 | 8080 |
+| `SG_DB_PATH` | SQLite 数据库路径 | securitygroup.db |
+| `SG_FIREWALL_MODE` | 防火墙模式: auto/netsh/mock | auto |
+| `SG_AUTO_SYNC` | 启动时自动同步: true/false | true |
+| `SG_LOG_LEVEL` | 日志级别: debug/info/error | info |
+| `SG_TRUSTED_PROXY` | 可信代理 CIDR | (空) |
+
+## REST API 接口
+
+### 基础信息
+
+- Base URL: `http://localhost:8080/api`
+- Content-Type: `application/json`
+
+### 1. 健康检查
+
+```
+GET /api/health
+```
+
+响应示例：
+```json
+{
+  "status": "ok",
+  "backend": "windows-netsh"
+}
+```
+
+### 2. 创建规则（即刻生效）
+
+```
+POST /api/rules
+```
+
+请求体：
+```json
+{
+  "group_id": "web-sg-001",
+  "group_name": "Web 服务器安全组",
+  "description": "允许办公网络访问 HTTP",
+  "action": "allow",
+  "direction": "inbound",
+  "protocol": "TCP",
+  "ip_address": "192.168.1.0/24",
+  "port_start": 80,
+  "port_end": 80,
+  "priority": 100
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| `group_id` | ✅ | string | 安全组 ID |
+| `group_name` | | string | 安全组名称 |
+| `description` | | string | 规则描述 |
+| `action` | ✅ | string | `allow`(放行) / `deny`(拦截) |
+| `direction` | | string | `inbound`(入站,默认) / `outbound`(出站) |
+| `protocol` | | string | `TCP` / `UDP` / `ANY`(默认) |
+| `ip_address` | ✅ | string | IP 地址或 CIDR，如 `10.0.0.1` 或 `10.0.0.0/8` |
+| `port_start` | | int | 起始端口 1-65535 |
+| `port_end` | | int | 结束端口 1-65535，需 >= port_start |
+| `priority` | | int | 优先级 1-10000，越小越优先，默认 100 |
+
+响应示例（201 Created）：
+```json
+{
+  "code": 0,
+  "message": "created",
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "group_id": "web-sg-001",
+    "group_name": "Web 服务器安全组",
+    "action": "allow",
+    "direction": "inbound",
+    "protocol": "TCP",
+    "ip_address": "192.168.1.0/24",
+    "port_start": 80,
+    "port_end": 80,
+    "priority": 100,
+    "status": "active",
+    "firewall_id": "SG_web-sg-001_550e8400",
+    "created_at": "2024-01-15T10:30:00Z",
+    "updated_at": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+### 3. 查询规则列表
+
+```
+GET /api/rules?group_id=xxx&action=allow&status=active&page=1&page_size=20
+```
+
+查询参数：
+
+| 参数 | 说明 |
+|------|------|
+| `group_id` | 按安全组 ID 过滤 |
+| `action` | 按动作过滤: allow/deny |
+| `status` | 按状态过滤: active/disabled/error |
+| `page` | 页码，默认 1 |
+| `page_size` | 每页数量，默认 20，最大 100 |
+
+响应示例：
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "total": 2,
+    "list": [
+      {
+        "id": "...",
+        "group_id": "web-sg-001",
+        "action": "allow",
+        "ip_address": "192.168.1.0/24",
+        "port_start": 80,
+        "status": "active",
+        "firewall_id": "SG_..."
+      },
+      {
+        "id": "...",
+        "group_id": "web-sg-001",
+        "action": "deny",
+        "ip_address": "10.0.0.5",
+        "status": "active",
+        "firewall_id": "SG_..."
+      }
+    ]
+  }
+}
+```
+
+### 4. 获取单个规则详情
+
+```
+GET /api/rules/:id
+```
+
+### 5. 修改规则（即刻生效）
+
+```
+PUT /api/rules/:id
+```
+
+请求体（所有字段可选，只传需要修改的字段）：
+```json
+{
+  "action": "deny",
+  "ip_address": "10.0.0.100",
+  "port_start": 443,
+  "port_end": 443,
+  "description": "已修改为拦截 HTTPS 访问"
+}
+```
+
+修改后规则会**立即重新应用到防火墙**（旧规则删除，新规则添加）。
+
+### 6. 启用/禁用规则
+
+```
+PUT /api/rules/:id
+```
+
+禁用（从防火墙移除但保留在数据库）：
+```json
+{
+  "status": "disabled"
+}
+```
+
+重新启用（立即添加到防火墙）：
+```json
+{
+  "status": "active"
+}
+```
+
+### 7. 删除规则
+
+```
+DELETE /api/rules/:id
+```
+
+删除时会**自动从防火墙移除对应规则**。
+
+### 8. 全量同步规则
+
+```
+POST /api/rules/sync
+```
+
+清理防火墙中所有由本系统管理的规则（前缀 `SG_`），然后根据数据库中的 active 规则重新构建。
+
+适用于：
+- 防火墙规则被意外修改后恢复
+- 服务重启后需要强制对齐
+- 数据库手动修改后同步
+
+## 核心设计：规则即刻生效机制
+
+### 架构分层
+
+```
+API 层 (handlers)
+    ↓
+业务层 (service)  ───→  事务协调：先操作防火墙，再落库
+    ↓
+防火墙管理器 (firewall.Manager)  ───→  状态机调度
+    ↓
+具体后端 (FirewallBackend)
+    ├── WindowsNetshBackend → netsh advfirewall 命令
+    └── MockBackend → 内存模拟（测试用）
+```
+
+### 关键保证
+
+1. **创建流程**：先 `netsh add rule` → 成功后写入 DB
+   - 防火墙失败：不写入 DB，返回错误
+   - DB 失败：自动 `netsh delete rule` 回滚
+
+2. **修改流程**：对比差异 → 有变化则「删旧+加新」
+   - 检测到规则关键字段（动作/方向/协议/IP/端口）变化才触发防火墙操作
+   - 仅修改描述/名称等不触发防火墙变更
+
+3. **启停切换**：
+   - active→disabled: 从防火墙删除，保留 DB 记录
+   - disabled→active: 重新添加到防火墙
+
+4. **删除流程**：先从防火墙移除 → 再删除 DB 记录
+
+5. **错误处理**：防火墙操作失败时标记 `status=error` 并记录 `error_msg`，便于人工排查
+
+## Windows 防火墙命名约定
+
+通过 netsh 创建的规则名称格式：`SG_{GroupID}_{RuleID前缀8位}`
+
+例如：`SG_web-sg-001_550e8400`
+
+这样可以识别哪些规则由本系统管理，同步时可安全清理。
+
+## 运行测试
+
+```bash
+# 运行业务逻辑单元测试（使用 mock 后端，无需真实防火墙权限）
+go test -v ./service/
+
+# 运行全部测试
+go test -v ./...
+
+# 测试覆盖率
+go test -cover ./...
+```
+
+测试覆盖场景：
+- 创建放行/拦截规则并验证防火墙即刻生效
+- 修改规则 IP/端口后验证旧规则删除、新规则添加
+- 启用→禁用→重新启用的状态流转
+- 删除规则同步清理防火墙
+- 输入参数校验（无效端口范围、缺失必填项等）
+- 规则过滤查询
+- 全量同步清理重建
+
+## 常见场景示例
+
+### 场景 1：屏蔽某个恶意 IP（立即拦截）
+
+```bash
+curl -X POST http://localhost:8080/api/rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_id": "blacklist",
+    "action": "deny",
+    "direction": "inbound",
+    "ip_address": "203.0.113.45",
+    "priority": 1
+  }'
+```
+
+**生效时间**：毫秒级，立即被 Windows 防火墙拦截。
+
+### 场景 2：开放办公网段访问 SSH
+
+```bash
+curl -X POST http://localhost:8080/api/rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_id": "ops-team",
+    "group_name": "运维组访问",
+    "description": "允许运维网段 SSH",
+    "action": "allow",
+    "direction": "inbound",
+    "protocol": "TCP",
+    "ip_address": "10.10.0.0/16",
+    "port_start": 22,
+    "priority": 50
+  }'
+```
+
+### 场景 3：临时禁用某条规则（不删除）
+
+```bash
+curl -X PUT http://localhost:8080/api/rules/{rule-id} \
+  -H "Content-Type: application/json" \
+  -d '{"status": "disabled"}'
+```
+
+## 注意事项
+
+1. **权限要求**：Windows 下需要以管理员身份运行，否则 netsh 命令会失败
+2. **规则冲突**：Windows 防火墙本身的拦截优先级高于放行（deny 优先）
+3. **规则前缀**：不要手动修改名称以 `SG_` 开头的 Windows 防火墙规则，会被同步时清理
+4. **生产建议**：生产环境使用前先以 `-firewall mock` 模式验证 API 逻辑
