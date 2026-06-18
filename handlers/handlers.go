@@ -11,11 +11,34 @@ import (
 )
 
 type RuleHandler struct {
-	svc *service.RuleService
+	svc         *service.RuleService
+	approvalSvc *service.ApprovalService
 }
 
 func NewRuleHandler(svc *service.RuleService) *RuleHandler {
 	return &RuleHandler{svc: svc}
+}
+
+func NewRuleHandlerWithApproval(svc *service.RuleService, approvalSvc *service.ApprovalService) *RuleHandler {
+	return &RuleHandler{
+		svc:         svc,
+		approvalSvc: approvalSvc,
+	}
+}
+
+func getApplicant(c *gin.Context) string {
+	applicant := c.GetHeader("X-Applicant")
+	if applicant == "" {
+		applicant = c.Query("applicant")
+	}
+	if applicant == "" {
+		applicant = "anonymous"
+	}
+	return applicant
+}
+
+func (h *RuleHandler) hasApprovalService() bool {
+	return h.approvalSvc != nil
 }
 
 func successResponse(c *gin.Context, data interface{}) {
@@ -84,6 +107,31 @@ func (h *RuleHandler) CreateRule(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errorResponse(c, http.StatusBadRequest, 40001, "invalid request body: "+err.Error())
 		return
+	}
+
+	if h.hasApprovalService() {
+		risk := service.EvaluateCreateRisk(&req)
+		if service.IsHighRisk(risk) {
+			applicant := getApplicant(c)
+			approval, err := h.approvalSvc.CreateApprovalForCreate(&req, applicant)
+			if err != nil && !errors.Is(err, service.ErrNoApprovalNeeded) {
+				errorResponse(c, http.StatusInternalServerError, 50006, "failed to create approval: "+err.Error())
+				return
+			}
+			if approval != nil {
+				c.JSON(http.StatusAccepted, models.APIResponse{
+					Code:    20201,
+					Message: "High-risk operation requires approval. Approval request created.",
+					Data: gin.H{
+						"approval_id": approval.ID,
+						"risk_level":  approval.RiskLevel,
+						"status":      approval.Status,
+						"approval":    approval,
+					},
+				})
+				return
+			}
+		}
 	}
 
 	rule, err := h.svc.CreateRule(&req)
@@ -157,6 +205,34 @@ func (h *RuleHandler) UpdateRule(c *gin.Context) {
 		return
 	}
 
+	if h.hasApprovalService() {
+		rule, err := h.svc.GetRule(id)
+		if err == nil && rule != nil {
+			risk := service.EvaluateUpdateRisk(rule, &req)
+			if service.IsHighRisk(risk) {
+				applicant := getApplicant(c)
+				approval, err := h.approvalSvc.CreateApprovalForUpdate(id, &req, applicant)
+				if err != nil && !errors.Is(err, service.ErrNoApprovalNeeded) {
+					errorResponse(c, http.StatusInternalServerError, 50007, "failed to create approval: "+err.Error())
+					return
+				}
+				if approval != nil {
+					c.JSON(http.StatusAccepted, models.APIResponse{
+						Code:    20202,
+						Message: "High-risk operation requires approval. Approval request created.",
+						Data: gin.H{
+							"approval_id": approval.ID,
+							"risk_level":  approval.RiskLevel,
+							"status":      approval.Status,
+							"approval":    approval,
+						},
+					})
+					return
+				}
+			}
+		}
+	}
+
 	rule, rbInfo, err := h.svc.UpdateRule(id, &req)
 	if err != nil {
 		respData := gin.H{
@@ -207,6 +283,34 @@ func (h *RuleHandler) DeleteRule(c *gin.Context) {
 	if id == "" {
 		errorResponse(c, http.StatusBadRequest, 40007, "rule id is required")
 		return
+	}
+
+	if h.hasApprovalService() {
+		rule, err := h.svc.GetRule(id)
+		if err == nil && rule != nil {
+			risk := service.EvaluateDeleteRisk(rule)
+			if service.IsHighRisk(risk) {
+				applicant := getApplicant(c)
+				approval, err := h.approvalSvc.CreateApprovalForDelete(id, applicant)
+				if err != nil && !errors.Is(err, service.ErrNoApprovalNeeded) {
+					errorResponse(c, http.StatusInternalServerError, 50008, "failed to create approval: "+err.Error())
+					return
+				}
+				if approval != nil {
+					c.JSON(http.StatusAccepted, models.APIResponse{
+						Code:    20203,
+						Message: "High-risk operation requires approval. Approval request created.",
+						Data: gin.H{
+							"approval_id": approval.ID,
+							"risk_level":  approval.RiskLevel,
+							"status":      approval.Status,
+							"approval":    approval,
+						},
+					})
+					return
+				}
+			}
+		}
 	}
 
 	rbInfo, err := h.svc.DeleteRule(id)
@@ -289,6 +393,32 @@ func (h *RuleHandler) BatchCreateRules(c *gin.Context) {
 		return
 	}
 
+	if h.hasApprovalService() {
+		risk := service.EvaluateBatchCreateRisk(req.Rules)
+		if service.IsHighRisk(risk) {
+			applicant := getApplicant(c)
+			approval, err := h.approvalSvc.CreateApprovalForBatchCreate(req.Rules, applicant)
+			if err != nil && !errors.Is(err, service.ErrNoApprovalNeeded) {
+				errorResponse(c, http.StatusInternalServerError, 50009, "failed to create approval: "+err.Error())
+				return
+			}
+			if approval != nil {
+				c.JSON(http.StatusAccepted, models.APIResponse{
+					Code:    20204,
+					Message: "High-risk batch operation requires approval. Approval request created.",
+					Data: gin.H{
+						"approval_id": approval.ID,
+						"risk_level":  approval.RiskLevel,
+						"status":      approval.Status,
+						"total":       len(req.Rules),
+						"approval":    approval,
+					},
+				})
+				return
+			}
+		}
+	}
+
 	result := h.svc.BatchCreateRules(req.Rules)
 	resp := toBatchResultResponse(result)
 
@@ -318,6 +448,39 @@ func (h *RuleHandler) BatchUpdateRules(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errorResponse(c, http.StatusBadRequest, 40011, "invalid request body: "+err.Error())
 		return
+	}
+
+	if h.hasApprovalService() {
+		rules := make(map[string]*models.SecurityRule)
+		for _, update := range req.Rules {
+			rule, err := h.svc.GetRule(update.ID)
+			if err == nil && rule != nil {
+				rules[update.ID] = rule
+			}
+		}
+		risk := service.EvaluateBatchUpdateRisk(req.Rules, rules)
+		if service.IsHighRisk(risk) {
+			applicant := getApplicant(c)
+			approval, err := h.approvalSvc.CreateApprovalForBatchUpdate(req.Rules, applicant)
+			if err != nil && !errors.Is(err, service.ErrNoApprovalNeeded) {
+				errorResponse(c, http.StatusInternalServerError, 50010, "failed to create approval: "+err.Error())
+				return
+			}
+			if approval != nil {
+				c.JSON(http.StatusAccepted, models.APIResponse{
+					Code:    20205,
+					Message: "High-risk batch operation requires approval. Approval request created.",
+					Data: gin.H{
+						"approval_id": approval.ID,
+						"risk_level":  approval.RiskLevel,
+						"status":      approval.Status,
+						"total":       len(req.Rules),
+						"approval":    approval,
+					},
+				})
+				return
+			}
+		}
 	}
 
 	result := h.svc.BatchUpdateRules(req.Rules)

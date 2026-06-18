@@ -38,6 +38,12 @@ func main() {
 	}
 	log.Println("Repository initialized (SQLite)")
 
+	approvalRepo := repository.NewSQLiteApprovalRepository(repo.GetDB())
+	if err := approvalRepo.AutoMigrate(); err != nil {
+		log.Fatalf("Failed to migrate approval repository: %v", err)
+	}
+	log.Println("Approval repository initialized")
+
 	var backend firewall.FirewallBackend
 	switch cfg.FirewallMode {
 	case config.ModeNetsh:
@@ -62,9 +68,13 @@ func main() {
 	}
 	log.Println("Rule service initialized")
 
-	handler := handlers.NewRuleHandler(svc)
+	approvalSvc := service.NewApprovalService(approvalRepo, svc)
+	approvalHandler := handlers.NewApprovalHandler(approvalSvc)
+	log.Println("Approval service initialized")
 
-	router := setupRouter(handler, cfg.TrustedProxy)
+	handler := handlers.NewRuleHandlerWithApproval(svc, approvalSvc)
+
+	router := setupRouter(handler, approvalHandler, cfg.TrustedProxy)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
@@ -107,7 +117,7 @@ func setupLogLevel(level string) {
 	}
 }
 
-func setupRouter(handler *handlers.RuleHandler, trustedProxy string) *gin.Engine {
+func setupRouter(handler *handlers.RuleHandler, approvalHandler *handlers.ApprovalHandler, trustedProxy string) *gin.Engine {
 	r := gin.Default()
 
 	if trustedProxy != "" {
@@ -132,6 +142,18 @@ func setupRouter(handler *handlers.RuleHandler, trustedProxy string) *gin.Engine
 
 			rules.POST("/batch", handler.BatchCreateRules)
 			rules.PUT("/batch", handler.BatchUpdateRules)
+		}
+
+		approvals := api.Group("/approvals")
+		{
+			approvals.POST("", approvalHandler.CreateApproval)
+			approvals.GET("", approvalHandler.ListApprovals)
+			approvals.GET("/:id", approvalHandler.GetApproval)
+			approvals.POST("/:id/approve", approvalHandler.Approve)
+			approvals.POST("/:id/reject", approvalHandler.Reject)
+			approvals.POST("/:id/execute", approvalHandler.Execute)
+			approvals.POST("/:id/cancel", approvalHandler.Cancel)
+			approvals.POST("/evaluate-risk", approvalHandler.EvaluateRisk)
 		}
 	}
 

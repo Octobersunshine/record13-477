@@ -100,3 +100,7 @@ func (r *SQLiteRepository) ListAllActive() ([]models.SecurityRule, error) {
 	err := r.db.Where("status = ?", models.StatusActive).Find(&rules).Error
 	return rules, err
 }
+
+func (r *SQLiteRepository) GetDB() *gorm.DB {
+	return r.db
+}

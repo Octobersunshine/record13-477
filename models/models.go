@@ -136,3 +136,87 @@ type APIResponse struct {
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
 }
+
+type ApprovalStatus string
+
+const (
+	ApprovalPending   ApprovalStatus = "pending"
+	ApprovalApproved  ApprovalStatus = "approved"
+	ApprovalRejected  ApprovalStatus = "rejected"
+	ApprovalExecuted  ApprovalStatus = "executed"
+	ApprovalCancelled ApprovalStatus = "cancelled"
+	ApprovalFailed    ApprovalStatus = "failed"
+)
+
+type ApprovalOperationType string
+
+const (
+	ApprovalOpCreate    ApprovalOperationType = "create"
+	ApprovalOpUpdate    ApprovalOperationType = "update"
+	ApprovalOpDelete    ApprovalOperationType = "delete"
+	ApprovalOpBatchCreate ApprovalOperationType = "batch_create"
+	ApprovalOpBatchUpdate ApprovalOperationType = "batch_update"
+	ApprovalOpSync      ApprovalOperationType = "sync"
+)
+
+type RiskLevel string
+
+const (
+	RiskLevelLow    RiskLevel = "low"
+	RiskLevelMedium RiskLevel = "medium"
+	RiskLevelHigh   RiskLevel = "high"
+	RiskLevelCritical RiskLevel = "critical"
+)
+
+type ApprovalRequest struct {
+	ID            string              `gorm:"primaryKey;type:varchar(36)" json:"id"`
+	Title         string              `gorm:"type:varchar(256);not null" json:"title"`
+	Description   string              `gorm:"type:varchar(512)" json:"description"`
+	OperationType ApprovalOperationType `gorm:"type:varchar(32);not null" json:"operation_type"`
+	RiskLevel     RiskLevel           `gorm:"type:varchar(16);not null" json:"risk_level"`
+	Status        ApprovalStatus      `gorm:"type:varchar(16);not null;default:pending" json:"status"`
+	Applicant     string              `gorm:"type:varchar(64);not null" json:"applicant"`
+	Approver      string              `gorm:"type:varchar(64)" json:"approver,omitempty"`
+	ApprovalRemark string             `gorm:"type:varchar(512)" json:"approval_remark,omitempty"`
+	RuleID        string              `gorm:"type:varchar(36)" json:"rule_id,omitempty"`
+	RuleSnapshot  string              `gorm:"type:text" json:"rule_snapshot,omitempty"`
+	NewRuleData   string              `gorm:"type:text" json:"new_rule_data,omitempty"`
+	ErrorMsg      string              `gorm:"type:varchar(512)" json:"error_msg,omitempty"`
+	SubmittedAt   *time.Time          `json:"submitted_at,omitempty"`
+	ApprovedAt    *time.Time          `json:"approved_at,omitempty"`
+	ExecutedAt    *time.Time          `json:"executed_at,omitempty"`
+	CreatedAt     time.Time           `json:"created_at"`
+	UpdatedAt     time.Time           `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt      `gorm:"index" json:"deleted_at,omitempty"`
+}
+
+type ApprovalListResponse struct {
+	Total int64             `json:"total"`
+	List  []ApprovalRequest `json:"list"`
+}
+
+type CreateApprovalRequest struct {
+	Title         string                `json:"title" binding:"required"`
+	Description   string                `json:"description"`
+	OperationType ApprovalOperationType `json:"operation_type" binding:"required,oneof=create update delete batch_create batch_update sync"`
+	RuleID        string                `json:"rule_id"`
+	NewRuleData   string                `json:"new_rule_data"`
+	Applicant     string                `json:"applicant" binding:"required"`
+}
+
+type ApproveRequest struct {
+	Approver string `json:"approver" binding:"required"`
+	Remark   string `json:"remark"`
+}
+
+type RejectRequest struct {
+	Approver string `json:"approver" binding:"required"`
+	Remark   string `json:"remark" binding:"required"`
+}
+
+type ExecuteApprovalResponse struct {
+	Success       bool                   `json:"success"`
+	RollbackInfo  *RollbackInfoResponse  `json:"rollback_info,omitempty"`
+	Result        interface{}            `json:"result,omitempty"`
+	ErrorMsg      string                 `json:"error_msg,omitempty"`
+}
